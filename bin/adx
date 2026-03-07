@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.0.6"
+ADX_VERSION="1.1.0"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -13,6 +13,38 @@ ADX_LABELS="${ADX_DIR}/labels"
 
 mkdir -p "$ADX_DIR"
 touch "$ADX_HISTORY" "$ADX_LABELS"
+
+# ---------------------------------------------------------------------------
+# Colors & formatting
+# ---------------------------------------------------------------------------
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+CYAN='\033[36m'
+RED='\033[31m'
+WHITE='\033[97m'
+
+_print()   { printf "%b\n" "$1"; }
+_success() { printf "  ${GREEN}✓${RESET} %b\n" "$1"; }
+_warn()    { printf "  ${YELLOW}!${RESET} %b\n" "$1"; }
+_error()   { printf "  ${RED}✗${RESET} %b\n" "$1"; }
+_info()    { printf "  ${DIM}%b${RESET}\n" "$1"; }
+_header()  { printf "\n  ${BOLD}${WHITE}%b${RESET}\n\n" "$1"; }
+
+_spinner() {
+    local pid=$1 msg="$2"
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  ${CYAN}${frames[$i]}${RESET} %s" "$msg" >&2
+        i=$(( (i + 1) % ${#frames[@]} ))
+        sleep 0.1
+    done
+    printf "\r\033[K" >&2
+}
 
 # ---------------------------------------------------------------------------
 # Platform detection
@@ -73,33 +105,31 @@ _check_deps() {
         return 0
     fi
 
-    echo "adx is missing required dependencies:"
-    echo ""
+    _header "Missing Dependencies"
     for dep in "${missing[@]}"; do
-        echo "  - $dep"
+        _error "$dep"
     done
-    echo ""
 
     if [[ ${#install_cmds[@]} -gt 0 ]]; then
-        echo "Install with:"
         echo ""
+        _print "  Install with:"
         for cmd in "${install_cmds[@]}"; do
-            echo "  $cmd"
+            _print "    ${CYAN}${cmd}${RESET}"
         done
         echo ""
-        echo -n "Run these now? [y/N] "
+        printf "  Run now? ${DIM}[y/N]${RESET} "
         read -r -n 1 answer; echo
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             for cmd in "${install_cmds[@]}"; do
                 [[ "$cmd" == "#"* ]] && continue
-                echo "Running: $cmd"
+                _info "Running: $cmd"
                 eval "$cmd"
             done
             echo ""
-            echo "Dependencies installed. Run 'adx' again."
+            _success "Dependencies installed. Run ${BOLD}adx${RESET} again."
         fi
     else
-        echo "Could not detect package manager. Please install manually."
+        _warn "Could not detect package manager. Please install manually."
     fi
 
     exit 1
@@ -108,27 +138,25 @@ _check_deps() {
 _check_scrcpy() {
     if ! _has scrcpy; then
         local pm=$(_pkg_manager)
-        echo "scrcpy is required for mirror commands but not installed."
+        _error "scrcpy is required for mirror commands"
         echo ""
         if [[ -n "$pm" ]]; then
-            echo "Install with:"
+            _print "  Install with: ${CYAN}$pm scrcpy${RESET}"
             echo ""
-            echo "  $pm scrcpy"
-            echo ""
-            echo -n "Run now? [y/N] "
+            printf "  Run now? ${DIM}[y/N]${RESET} "
             read -r -n 1 answer; echo
             if [[ "$answer" =~ ^[Yy]$ ]]; then
                 eval "$pm scrcpy"
                 echo ""
                 if ! _has scrcpy; then
-                    echo "Installation failed."
+                    _error "Installation failed."
                     exit 1
                 fi
             else
                 exit 1
             fi
         else
-            echo "Please install scrcpy manually: https://github.com/Genymobile/scrcpy"
+            _warn "Install scrcpy manually: https://github.com/Genymobile/scrcpy"
             exit 1
         fi
     fi
@@ -141,7 +169,7 @@ _check_deps
 # ---------------------------------------------------------------------------
 _label_for() {
     local target="$1"
-    grep "^${target}|" "$ADX_LABELS" 2>/dev/null | cut -d'|' -f2 | head -1
+    grep "^${target}|" "$ADX_LABELS" 2>/dev/null | cut -d'|' -f2 | head -1 || true
 }
 
 _display_name() {
@@ -171,6 +199,12 @@ _set_label() {
     grep -v "^${target}|" "$ADX_LABELS" > "${ADX_LABELS}.tmp" 2>/dev/null || true
     echo "${target}|${label}" >> "${ADX_LABELS}.tmp"
     mv "${ADX_LABELS}.tmp" "$ADX_LABELS"
+}
+
+_connected_count() {
+    local count
+    count=$(adb devices 2>/dev/null | grep -c "device$") || true
+    echo "${count:-0}"
 }
 
 # ---------------------------------------------------------------------------
@@ -290,22 +324,29 @@ _pick_device() {
     local devices=()
     local seen=()
 
-    echo "Scanning for devices (3s)..." >&2
+    # Scan in background with spinner
+    local scan_tmp
+    scan_tmp=$(mktemp)
+    _scan_devices > "$scan_tmp" 2>/dev/null &
+    local scan_pid=$!
 
-    # USB/wired + already connected devices
+    # Get already-connected devices immediately
     while IFS='|' read -r target dname; do
         [[ -z "$target" ]] && continue
         local display
         display=$(_display_name "$target" "$dname")
         if [[ "$target" == *":"* ]]; then
-            devices+=("${display} [wifi]|${target}|${dname}")
+            devices+=("${display} ${DIM}wifi${RESET}|${target}|${dname}")
         else
-            devices+=("${display} [usb]|${target}|${dname}")
+            devices+=("${display} ${DIM}usb${RESET}|${target}|${dname}")
         fi
         seen+=("$target")
     done < <(_get_adb_devices)
 
-    # mDNS discovered (not yet connected)
+    # Wait for mDNS scan with spinner
+    _spinner $scan_pid "Scanning network..."
+
+    # Add mDNS-discovered devices
     while IFS='|' read -r target dname; do
         [[ -z "$target" ]] && continue
         local already=0
@@ -315,17 +356,19 @@ _pick_device() {
         [[ $already -eq 1 ]] && continue
         local display
         display=$(_display_name "$target" "$dname")
-        devices+=("${display} [wifi]|${target}|${dname}")
-    done < <(_scan_devices)
+        devices+=("${display} ${DIM}wifi${RESET}|${target}|${dname}")
+    done < "$scan_tmp"
+    rm -f "$scan_tmp"
 
     if [[ ${#devices[@]} -eq 0 ]]; then
-        echo "No devices found. Make sure Wireless Debugging is enabled or a device is plugged in." >&2
+        _error "No devices found"
+        _info "Make sure Wireless Debugging is enabled or a device is plugged in"
         return 1
     fi
 
-    echo "Found ${#devices[@]} device(s)." >&2
+    _success "Found ${BOLD}${#devices[@]}${RESET} device(s)" >&2
 
-    local fzf_opts=(--height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="$prompt" --no-scrollbar --color=pointer:green)
+    local fzf_opts=(--height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="$prompt" --no-scrollbar --color=pointer:green --ansi)
     [[ -n "$multi" ]] && fzf_opts+=(--multi)
 
     local selected
@@ -351,11 +394,16 @@ _pick_device() {
 _connect() {
     local target="$1" dname="${2:-}"
     if [[ "$target" == *":"* ]]; then
-        echo "Connecting to $target..."
-        adb connect "$target"
+        local result
+        result=$(adb connect "$target" 2>&1)
+        if echo "$result" | grep -q "connected"; then
+            _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
+        else
+            _error "Failed: $result"
+        fi
         _add_history "$target" "$dname"
     else
-        echo "Using USB device $target"
+        _success "Using USB device ${BOLD}${dname:-$target}${RESET}"
     fi
 }
 
@@ -380,7 +428,7 @@ _do_scan_mirror() {
 
     _connect "$target" "$dname"
     sleep 1
-    echo "Launching scrcpy..."
+    _success "Launching scrcpy..."
     scrcpy -s "$target" &>/dev/null &
     disown
 }
@@ -388,7 +436,7 @@ _do_scan_mirror() {
 _do_reconnect() {
     local mirror="${1:-}"
     if [[ ! -s "$ADX_HISTORY" ]]; then
-        echo "No connection history."
+        _warn "No connection history"
         return 1
     fi
 
@@ -407,26 +455,32 @@ _do_reconnect() {
 
     local target
     target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
-    [[ -z "$target" ]] && { echo "Could not parse address."; return 1; }
+    [[ -z "$target" ]] && { _error "Could not parse address"; return 1; }
 
     _connect "$target"
 
     if [[ "$mirror" == "mirror" ]]; then
         sleep 1
-        echo "Launching scrcpy..."
+        _success "Launching scrcpy..."
         scrcpy -s "$target" &>/dev/null &
         disown
     fi
 }
 
 _do_pair() {
-    echo "Scanning for devices in pairing mode (5s)..."
+    local scan_tmp
+    scan_tmp=$(mktemp)
+    _mdns_browse "_adb-tls-pairing._tcp" 5 > "$scan_tmp" &
+    local scan_pid=$!
+    _spinner $scan_pid "Looking for devices in pairing mode..."
+
     local instances
-    instances=($(_mdns_browse "_adb-tls-pairing._tcp" 5))
+    instances=($(cat "$scan_tmp"))
+    rm -f "$scan_tmp"
 
     if [[ ${#instances[@]} -eq 0 ]]; then
-        echo "No devices in pairing mode found."
-        echo "On your device: Settings > Developer Options > Wireless Debugging > Pair device with pairing code"
+        _error "No devices in pairing mode"
+        _info "On your device: Settings > Developer Options > Wireless Debugging > Pair device with pairing code"
         return 1
     fi
 
@@ -455,9 +509,11 @@ _do_pair() {
     done
 
     if [[ ${#devices[@]} -eq 0 ]]; then
-        echo "Found devices but couldn't resolve addresses."
+        _error "Found devices but couldn't resolve addresses"
         return 1
     fi
+
+    _success "Found ${BOLD}${#devices[@]}${RESET} device(s) in pairing mode"
 
     local selected
     selected=$(printf '%s\n' "${devices[@]}" | fzf --height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Pair > " --no-scrollbar --color=pointer:green)
@@ -465,60 +521,127 @@ _do_pair() {
 
     local target
     target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
-    echo -n "Pairing code: "
+    printf "  Pairing code: "
     read -r code
-    [[ -z "$code" ]] && { echo "No code provided."; return 1; }
+    [[ -z "$code" ]] && { _error "No code provided"; return 1; }
 
-    adb pair "$target" "$code"
+    local result
+    result=$(adb pair "$target" "$code" 2>&1)
+    if echo "$result" | grep -qi "success"; then
+        _success "Paired successfully"
+    else
+        _error "$result"
+    fi
 }
 
 _do_status() {
-    adb devices -l
+    _header "Connected Devices"
+
+    local count=0
+    while IFS= read -r line; do
+        local serial status model product transport
+        serial=$(echo "$line" | awk '{print $1}')
+        status=$(echo "$line" | awk '{print $2}')
+        model=$(echo "$line" | grep -o 'model:[^ ]*' | cut -d: -f2)
+        product=$(echo "$line" | grep -o 'product:[^ ]*' | cut -d: -f2)
+
+        [[ -z "$serial" ]] && continue
+        count=$((count + 1))
+
+        local label
+        label=$(_label_for "$serial")
+        local name="${label:-${model:-unknown}}"
+
+        local type_tag="${BLUE}wifi${RESET}"
+        [[ "$serial" != *":"* ]] && type_tag="${GREEN}usb${RESET}"
+
+        local status_color="${GREEN}"
+        [[ "$status" != "device" ]] && status_color="${YELLOW}"
+
+        printf "  ${BOLD}${WHITE}%-20s${RESET} ${DIM}%-25s${RESET} [${type_tag}] ${status_color}${status}${RESET}\n" "$name" "$serial"
+    done < <(adb devices -l 2>/dev/null | grep -v "^List\|^$")
+
+    if [[ $count -eq 0 ]]; then
+        _info "No devices connected"
+    else
+        echo ""
+        _info "$count device(s) connected"
+    fi
 }
 
 _do_disconnect() {
     local connected
     connected=$(adb devices | grep -v "^List\|^$" | awk '{print $1}')
     if [[ -z "$connected" ]]; then
-        echo "No connected devices."
+        _warn "No connected devices"
         return 0
     fi
 
-    local entries=("Disconnect all")
+    local entries=("${RED}Disconnect all${RESET}")
     while IFS= read -r dev; do
         local label
         label=$(_label_for "$dev")
         if [[ -n "$label" ]]; then
-            entries+=("$label ($dev)")
+            entries+=("$label ${DIM}($dev)${RESET}")
         else
             entries+=("$dev")
         fi
     done <<< "$connected"
 
     local selected
-    selected=$(printf '%s\n' "${entries[@]}" | fzf --height=$((${#entries[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Disconnect > " --no-scrollbar --color=pointer:green)
+    selected=$(printf '%s\n' "${entries[@]}" | fzf --height=$((${#entries[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Disconnect > " --no-scrollbar --color=pointer:green --ansi)
     [[ -z "$selected" ]] && return 0
 
-    if [[ "$selected" == "Disconnect all" ]]; then
-        adb disconnect
-        echo "Disconnected all devices."
+    if echo "$selected" | grep -q "Disconnect all"; then
+        adb disconnect &>/dev/null
+        _success "Disconnected all devices"
     else
         local target
         target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
-        adb disconnect "$target"
-        echo "Disconnected $selected."
+        if [[ -n "$target" ]]; then
+            adb disconnect "$target" &>/dev/null
+            _success "Disconnected ${BOLD}$target${RESET}"
+        else
+            local serial
+            serial=$(echo "$selected" | sed "s/$(printf '\033')\[[0-9;]*m//g" | awk '{print $1}')
+            adb disconnect "$serial" &>/dev/null
+            _success "Disconnected ${BOLD}$serial${RESET}"
+        fi
     fi
 }
 
 _do_label() {
-    echo -n "IP:Port (e.g. 10.1.4.90:35565): "
+    # Show connected devices for easy picking
+    local connected
+    connected=$(adb devices | grep -v "^List\|^$" | awk '{print $1}')
+
+    if [[ -n "$connected" ]]; then
+        local entries=()
+        while IFS= read -r dev; do
+            entries+=("$dev")
+        done <<< "$connected"
+
+        local selected
+        selected=$(printf '%s\n' "${entries[@]}" | fzf --height=$((${#entries[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Label which device > " --no-scrollbar --color=pointer:green)
+
+        if [[ -n "$selected" ]]; then
+            printf "  Label for ${BOLD}${selected}${RESET}: "
+            read -r label
+            [[ -z "$label" ]] && return 1
+            _set_label "$selected" "$label"
+            _success "Labeled ${BOLD}$selected${RESET} as ${CYAN}$label${RESET}"
+            return 0
+        fi
+    fi
+
+    printf "  IP:Port: "
     read -r target
     [[ -z "$target" ]] && return 1
-    echo -n "Label: "
+    printf "  Label: "
     read -r label
     [[ -z "$label" ]] && return 1
     _set_label "$target" "$label"
-    echo "Labeled $target as '$label'."
+    _success "Labeled ${BOLD}$target${RESET} as ${CYAN}$label${RESET}"
 }
 
 # ---------------------------------------------------------------------------
@@ -536,25 +659,22 @@ _check_for_update() {
     [[ -f "$ADX_LAST_CHECK" ]] && last_check=$(cat "$ADX_LAST_CHECK" 2>/dev/null || echo 0)
     local elapsed=$((now - last_check))
 
-    # Check once per day (86400 seconds)
     [[ $elapsed -lt 86400 ]] && {
-        # Show cached hint if available
         if [[ -f "$ADX_LATEST_CACHE" ]]; then
             local cached
             cached=$(cat "$ADX_LATEST_CACHE")
-            [[ -n "$cached" && "$cached" != "$ADX_VERSION" ]] && echo "adx v${cached} available — run 'adx upgrade' to update" >&2
+            [[ -n "$cached" && "$cached" != "$ADX_VERSION" ]] && _warn "adx ${BOLD}v${cached}${RESET} available — run ${CYAN}adx upgrade${RESET} to update" >&2
         fi
         return 0
     }
 
-    # Background check — don't slow down startup
     (
         local latest
         latest=$(curl -fsSL --connect-timeout 3 "https://api.github.com/repos/${ADX_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
         if [[ -n "$latest" ]]; then
             echo "$now" > "$ADX_LAST_CHECK"
             echo "$latest" > "$ADX_LATEST_CACHE"
-            [[ "$latest" != "$ADX_VERSION" ]] && echo "adx v${latest} available — run 'adx upgrade' to update" >&2
+            [[ "$latest" != "$ADX_VERSION" ]] && _warn "adx ${BOLD}v${latest}${RESET} available — run ${CYAN}adx upgrade${RESET} to update" >&2
         fi
     ) &
     disown
@@ -574,28 +694,28 @@ _install_version() {
     self_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
     local download_url="https://raw.githubusercontent.com/${ADX_REPO}/v${version}/bin/adx"
 
-    echo "Downloading v${version}..."
     local tmpfile
     tmpfile=$(mktemp)
-    if ! curl -fsSL "$download_url" -o "$tmpfile"; then
+    curl -fsSL "$download_url" -o "$tmpfile" &
+    local dl_pid=$!
+    _spinner $dl_pid "Downloading v${version}..."
+
+    if ! wait $dl_pid; then
         rm -f "$tmpfile"
-        echo "Download failed."
+        _error "Download failed"
         return 1
     fi
 
     chmod +x "$tmpfile"
-
-    # Ensure target is writable (brew installs as read-only)
     chmod u+w "$self_path" 2>/dev/null || true
 
-    # Try direct write, then sudo if needed
     if cp "$tmpfile" "$self_path" 2>/dev/null; then
-        echo "Switched to v${version}."
+        _success "Switched to ${BOLD}v${version}${RESET}"
     elif sudo cp "$tmpfile" "$self_path"; then
-        echo "Switched to v${version}."
+        _success "Switched to ${BOLD}v${version}${RESET}"
     else
-        echo "Could not write to $self_path"
-        echo "Try manually: sudo cp $tmpfile $self_path"
+        _error "Could not write to $self_path"
+        _info "Try: sudo cp $tmpfile $self_path"
         return 1
     fi
 
@@ -605,47 +725,52 @@ _install_version() {
 
 _do_upgrade() {
     if ! _has curl; then
-        echo "curl is required for upgrades."
+        _error "curl is required for upgrades"
         return 1
     fi
 
-    # adx upgrade --list — pick any version
     if [[ "${1:-}" == "--list" ]]; then
-        echo "Fetching versions..."
+        local versions_tmp
+        versions_tmp=$(mktemp)
+        _fetch_all_versions > "$versions_tmp" &
+        local fetch_pid=$!
+        _spinner $fetch_pid "Fetching versions..."
+
         local versions
-        versions=($(_fetch_all_versions))
+        versions=($(cat "$versions_tmp"))
+        rm -f "$versions_tmp"
 
         if [[ ${#versions[@]} -eq 0 ]]; then
-            echo "Could not fetch versions. Are you online?"
+            _error "Could not fetch versions. Are you online?"
             return 1
         fi
 
-        # Mark current version
         local display=()
         for v in "${versions[@]}"; do
             if [[ "$v" == "$ADX_VERSION" ]]; then
-                display+=("$v (current)")
+                display+=("$v ${GREEN}(current)${RESET}")
             else
                 display+=("$v")
             fi
         done
 
         local selected
-        selected=$(printf '%s\n' "${display[@]}" | fzf --height=$((${#display[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Version > " --no-scrollbar --color=pointer:green)
+        selected=$(printf '%s\n' "${display[@]}" | fzf --height=$((${#display[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Version > " --no-scrollbar --color=pointer:green --ansi)
         [[ -z "$selected" ]] && return 0
 
         local target_version
         target_version=$(echo "$selected" | awk '{print $1}')
 
         if [[ "$target_version" == "$ADX_VERSION" ]]; then
-            echo "Already on v${ADX_VERSION}."
+            _info "Already on v${ADX_VERSION}"
             return 0
         fi
 
-        echo "Current: $ADX_VERSION"
-        echo "Target:  $target_version"
         echo ""
-        echo -n "Switch? [y/N] "
+        _print "  Current: ${DIM}$ADX_VERSION${RESET}"
+        _print "  Target:  ${BOLD}$target_version${RESET}"
+        echo ""
+        printf "  Switch? ${DIM}[y/N]${RESET} "
         read -r -n 1 answer; echo
         [[ ! "$answer" =~ ^[Yy]$ ]] && return 0
 
@@ -653,26 +778,30 @@ _do_upgrade() {
         return $?
     fi
 
-    # adx upgrade — latest version
-    echo "Checking for updates..."
+    local latest_tmp
+    latest_tmp=$(mktemp)
+    _fetch_latest_version > "$latest_tmp" &
+    local fetch_pid=$!
+    _spinner $fetch_pid "Checking for updates..."
 
     local latest
-    latest=$(_fetch_latest_version)
+    latest=$(cat "$latest_tmp")
+    rm -f "$latest_tmp"
 
     if [[ -z "$latest" ]]; then
-        echo "Could not check for updates. Are you online?"
+        _error "Could not check for updates. Are you online?"
         return 1
     fi
 
     if [[ "$latest" == "$ADX_VERSION" ]]; then
-        echo "Already on latest version ($ADX_VERSION)."
+        _success "Already on latest ${DIM}(v${ADX_VERSION})${RESET}"
         return 0
     fi
 
-    echo "Current: $ADX_VERSION"
-    echo "Latest:  $latest"
+    _print "  Current: ${DIM}$ADX_VERSION${RESET}"
+    _print "  Latest:  ${GREEN}${BOLD}$latest${RESET}"
     echo ""
-    echo -n "Upgrade? [y/N] "
+    printf "  Upgrade? ${DIM}[y/N]${RESET} "
     read -r -n 1 answer; echo
     [[ ! "$answer" =~ ^[Yy]$ ]] && return 0
 
@@ -680,8 +809,63 @@ _do_upgrade() {
 }
 
 # ---------------------------------------------------------------------------
-# Main
+# Banner
 # ---------------------------------------------------------------------------
+_banner() {
+    local count
+    count=$(_connected_count)
+    local count_text="${count} device(s) connected"
+    local count_color="${GREEN}"
+    [[ $count -eq 0 ]] && count_color="${DIM}"
+
+    printf "\n"
+    printf "  ${BOLD}${CYAN}adx${RESET} ${DIM}v${ADX_VERSION}${RESET}  ${DIM}—${RESET}  ${count_color}${count_text}${RESET}\n"
+    printf "  ${DIM}Android Developer eXperience${RESET}\n"
+    printf "\n"
+}
+
+# ---------------------------------------------------------------------------
+# Main menu
+# ---------------------------------------------------------------------------
+_build_menu() {
+    local last_target="" last_label=""
+    if [[ -s "$ADX_HISTORY" ]]; then
+        IFS='|' read -r last_target last_label _ < "$ADX_HISTORY"
+    fi
+
+    local reconnect_hint=""
+    [[ -n "$last_label" ]] && reconnect_hint=" → $last_label"
+    [[ -z "$reconnect_hint" && -n "$last_target" ]] && reconnect_hint=" → $last_target"
+
+    # Build menu with section headers
+    printf "${BOLD}CONNECT${RESET}\n"
+    printf "  Scan & Connect\n"
+    printf "  Scan & Mirror\n"
+    printf "  Pair\n"
+
+    if [[ -n "$last_target" ]]; then
+        printf "${BOLD}QUICK${RESET}\n"
+        printf "  Reconnect${DIM}${reconnect_hint}${RESET}\n"
+        printf "  Reconnect & Mirror${DIM}${reconnect_hint}${RESET}\n"
+    fi
+
+    printf "${BOLD}MANAGE${RESET}\n"
+    printf "  Status\n"
+    printf "  Disconnect\n"
+    printf "  Label Device\n"
+
+    printf "${BOLD}SYSTEM${RESET}\n"
+
+    local update_hint=""
+    if [[ -f "$ADX_LATEST_CACHE" ]]; then
+        local cached
+        cached=$(cat "$ADX_LATEST_CACHE")
+        [[ -n "$cached" && "$cached" != "$ADX_VERSION" ]] && update_hint=" ${YELLOW}(v${cached} available)${RESET}"
+    fi
+    printf "  Upgrade${update_hint}\n"
+    printf "  ${DIM}Exit${RESET}\n"
+}
+
 _main() {
     if [[ "${1:-}" == "--version" || "${1:-}" == "-v" ]]; then
         echo "adx $ADX_VERSION"
@@ -689,23 +873,25 @@ _main() {
     fi
 
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        echo "adx — Android Developer eXperience"
-        echo ""
-        echo "Usage: adx [command]"
-        echo ""
-        echo "Commands:"
-        echo "  scan        Scan & connect to a device"
-        echo "  mirror      Scan, connect & launch scrcpy"
-        echo "  reconnect   Reconnect to a previous device"
-        echo "  remirror    Reconnect & launch scrcpy"
-        echo "  pair        Pair a new device"
-        echo "  status      Show connected devices"
-        echo "  disconnect  Disconnect devices"
-        echo "  label       Assign a friendly name to a device"
-        echo "  upgrade     Update adx to the latest version"
-        echo "  upgrade --list  Pick any version to install"
-        echo ""
-        echo "Run without arguments for interactive menu."
+        _print ""
+        _print "  ${BOLD}${CYAN}adx${RESET} — Android Developer eXperience"
+        _print ""
+        _print "  ${BOLD}Usage:${RESET} adx ${DIM}[command]${RESET}"
+        _print ""
+        _print "  ${BOLD}Commands:${RESET}"
+        _print "    ${CYAN}scan${RESET}            Scan & connect to a device"
+        _print "    ${CYAN}mirror${RESET}          Scan, connect & launch scrcpy"
+        _print "    ${CYAN}reconnect${RESET}       Reconnect to a previous device"
+        _print "    ${CYAN}remirror${RESET}        Reconnect & launch scrcpy"
+        _print "    ${CYAN}pair${RESET}            Pair a new device"
+        _print "    ${CYAN}status${RESET}          Show connected devices"
+        _print "    ${CYAN}disconnect${RESET}      Disconnect devices"
+        _print "    ${CYAN}label${RESET}           Assign a friendly name to a device"
+        _print "    ${CYAN}upgrade${RESET}         Update to the latest version"
+        _print "    ${CYAN}upgrade --list${RESET}  Pick any version to install"
+        _print ""
+        _print "  Run without arguments for interactive menu."
+        _print ""
         return 0
     fi
 
@@ -724,32 +910,42 @@ _main() {
             disconnect) _do_disconnect ;;
             label)      _do_label ;;
             upgrade)    shift; _do_upgrade "$@" ;;
-            *)          echo "Unknown command: $cmd. Run 'adx --help' for usage."; return 1 ;;
+            *)          _error "Unknown command: $cmd"; _info "Run 'adx --help' for usage"; return 1 ;;
         esac
         return $?
     fi
 
     while true; do
+        _banner
+
         local choice
-        choice=$(printf "Scan & Connect\nScan & Mirror\nReconnect\nReconnect & Mirror\nPair\nStatus\nDisconnect\nLabel Device\nUpgrade\nExit" | fzf --height=14 --layout=reverse --no-info --no-sort --prompt="adx > " --no-scrollbar --color=pointer:green)
+        choice=$(_build_menu | fzf --height=20 --layout=reverse --no-info --no-sort --prompt="  " --no-scrollbar --color=pointer:green --ansi --delimiter='\n')
 
-        [[ -z "$choice" ]] && return 0
+        [[ -z "$choice" ]] && { echo ""; return 0; }
 
-        case "$choice" in
+        # Strip ANSI codes and leading spaces for matching
+        local clean
+        clean=$(echo "$choice" | sed "s/$(printf '\033')\[[0-9;]*m//g" | sed 's/^  //' | sed 's/ →.*//')
+
+        echo ""
+
+        case "$clean" in
             "Scan & Connect")       _do_scan_connect ;;
             "Scan & Mirror")        _do_scan_mirror ;;
+            "Pair")                 _do_pair ;;
             "Reconnect")            _do_reconnect ;;
             "Reconnect & Mirror")   _do_reconnect mirror ;;
-            "Pair")                 _do_pair ;;
             "Status")               _do_status ;;
             "Disconnect")           _do_disconnect ;;
             "Label Device")         _do_label ;;
             "Upgrade")              _do_upgrade ;;
             "Exit")                 return 0 ;;
+            CONNECT|QUICK|MANAGE|SYSTEM) continue ;;
+            *)                      continue ;;
         esac
 
         echo ""
-        echo -n "Press any key to continue..."
+        printf "  ${DIM}Press any key to continue...${RESET}"
         read -r -n 1 -s; echo
     done
 }
