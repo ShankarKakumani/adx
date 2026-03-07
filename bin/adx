@@ -6,7 +6,7 @@
 set -euo pipefail
 
 ADX_VERSION="1.0.0"
-ADX_REPO="raknash/adx"
+ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
 ADX_LABELS="${ADX_DIR}/labels"

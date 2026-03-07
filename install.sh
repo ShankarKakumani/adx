@@ -3,7 +3,7 @@
 set -e
 
 INSTALL_DIR="/usr/local/bin"
-REPO="https://raw.githubusercontent.com/raknash/adx/main/bin/adx"
+REPO="https://raw.githubusercontent.com/ShankarKakumani/adx/main/bin/adx"
 
 echo "Installing adx..."
 
