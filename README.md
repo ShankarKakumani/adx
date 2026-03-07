@@ -36,20 +36,20 @@ adx upgrade     # update adx
 ### Homebrew (macOS)
 
 ```sh
-brew tap raknash/tools
+brew tap ShankarKakumani/adx
 brew install adx
 ```
 
 ### Manual
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/raknash/adx/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ShankarKakumani/adx/main/install.sh | sh
 ```
 
 ### From source
 
 ```sh
-git clone https://github.com/raknash/adx.git
+git clone https://github.com/ShankarKakumani/adx.git
 ln -s $(pwd)/adx/bin/adx /usr/local/bin/adx
 ```
 
