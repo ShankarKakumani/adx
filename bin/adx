@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.1.0"
+ADX_VERSION="1.1.1"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -335,11 +335,9 @@ _pick_device() {
         [[ -z "$target" ]] && continue
         local display
         display=$(_display_name "$target" "$dname")
-        if [[ "$target" == *":"* ]]; then
-            devices+=("${display} ${DIM}wifi${RESET}|${target}|${dname}")
-        else
-            devices+=("${display} ${DIM}usb${RESET}|${target}|${dname}")
-        fi
+        local tag="wifi"
+        [[ "$target" != *":"* ]] && tag="usb"
+        devices+=("${display} [${tag}]|${target}|${dname}")
         seen+=("$target")
     done < <(_get_adb_devices)
 
@@ -356,7 +354,7 @@ _pick_device() {
         [[ $already -eq 1 ]] && continue
         local display
         display=$(_display_name "$target" "$dname")
-        devices+=("${display} ${DIM}wifi${RESET}|${target}|${dname}")
+        devices+=("${display} [wifi]|${target}|${dname}")
     done < "$scan_tmp"
     rm -f "$scan_tmp"
 
@@ -368,7 +366,9 @@ _pick_device() {
 
     _success "Found ${BOLD}${#devices[@]}${RESET} device(s)" >&2
 
-    local fzf_opts=(--height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="$prompt" --no-scrollbar --color=pointer:green --ansi)
+    local fzf_height=$((${#devices[@]} + 2))
+    [[ $fzf_height -lt 10 ]] && fzf_height=10
+    local fzf_opts=(--height=$fzf_height --layout=reverse --no-info --no-sort --prompt="$prompt" --color=pointer:green)
     [[ -n "$multi" ]] && fzf_opts+=(--multi)
 
     local selected
@@ -577,22 +577,25 @@ _do_disconnect() {
         return 0
     fi
 
-    local entries=("${RED}Disconnect all${RESET}")
+    local entries=("Disconnect all")
     while IFS= read -r dev; do
         local label
         label=$(_label_for "$dev")
         if [[ -n "$label" ]]; then
-            entries+=("$label ${DIM}($dev)${RESET}")
+            entries+=("$label ($dev)")
         else
             entries+=("$dev")
         fi
     done <<< "$connected"
 
+    local fzf_height=$((${#entries[@]} + 2))
+    [[ $fzf_height -lt 10 ]] && fzf_height=10
+
     local selected
-    selected=$(printf '%s\n' "${entries[@]}" | fzf --height=$((${#entries[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Disconnect > " --no-scrollbar --color=pointer:green --ansi)
+    selected=$(printf '%s\n' "${entries[@]}" | fzf --height=$fzf_height --layout=reverse --no-info --no-sort --prompt="Disconnect > " --color=pointer:green)
     [[ -z "$selected" ]] && return 0
 
-    if echo "$selected" | grep -q "Disconnect all"; then
+    if [[ "$selected" == "Disconnect all" ]]; then
         adb disconnect &>/dev/null
         _success "Disconnected all devices"
     else
@@ -602,10 +605,8 @@ _do_disconnect() {
             adb disconnect "$target" &>/dev/null
             _success "Disconnected ${BOLD}$target${RESET}"
         else
-            local serial
-            serial=$(echo "$selected" | sed "s/$(printf '\033')\[[0-9;]*m//g" | awk '{print $1}')
-            adb disconnect "$serial" &>/dev/null
-            _success "Disconnected ${BOLD}$serial${RESET}"
+            adb disconnect "$selected" &>/dev/null
+            _success "Disconnected ${BOLD}$selected${RESET}"
         fi
     fi
 }
