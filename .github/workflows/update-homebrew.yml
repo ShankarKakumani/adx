@@ -1,0 +1,40 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          TARBALL_URL="https://github.com/ShankarKakumani/adx/archive/refs/tags/v${VERSION}.tar.gz"
+          echo "tarball_url=$TARBALL_URL" >> "$GITHUB_OUTPUT"
+          SHA256=$(curl -fsSL "$TARBALL_URL" | shasum -a 256 | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-adx
+        uses: actions/checkout@v4
+        with:
+          repository: ShankarKakumani/homebrew-adx
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          SHA256="${{ steps.release.outputs.sha256 }}"
+          sed -i "s|url \".*\"|url \"https://github.com/ShankarKakumani/adx/archive/refs/tags/v${VERSION}.tar.gz\"|" Formula/adx.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/adx.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/adx.rb
+          git commit -m "Update adx to v${{ steps.release.outputs.version }}"
+          git push
