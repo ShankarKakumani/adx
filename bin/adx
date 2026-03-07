@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.1.2"
+ADX_VERSION="1.1.3"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -722,6 +722,7 @@ _install_version() {
 
     rm -f "$tmpfile"
     echo "$version" > "$ADX_LATEST_CACHE"
+    exit 0
 }
 
 _do_upgrade() {
