@@ -279,7 +279,7 @@ _pick_device() {
     local multi="${2:-}"
     local devices=()
 
-    echo "Scanning for devices (3s)..."
+    echo "Scanning for devices (3s)..." >&2
     while IFS='|' read -r target dname; do
         local display
         display=$(_display_name "$target" "$dname")
@@ -287,11 +287,11 @@ _pick_device() {
     done < <(_scan_devices)
 
     if [[ ${#devices[@]} -eq 0 ]]; then
-        echo "No devices found. Make sure Wireless Debugging is enabled."
+        echo "No devices found. Make sure Wireless Debugging is enabled." >&2
         return 1
     fi
 
-    echo "Found ${#devices[@]} device(s)."
+    echo "Found ${#devices[@]} device(s)." >&2
 
     local fzf_opts=(--height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="$prompt" --no-scrollbar --color=pointer:green)
     [[ -n "$multi" ]] && fzf_opts+=(--multi)
