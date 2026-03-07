@@ -1,0 +1,608 @@
+#!/usr/bin/env bash
+
+# adx — Android Developer eXperience
+# WiFi connect + scrcpy mirror for Android 11+ devices
+
+set -euo pipefail
+
+ADX_VERSION="1.0.0"
+ADX_REPO="raknash/adx"
+ADX_DIR="${HOME}/.adx"
+ADX_HISTORY="${ADX_DIR}/history"
+ADX_LABELS="${ADX_DIR}/labels"
+
+mkdir -p "$ADX_DIR"
+touch "$ADX_HISTORY" "$ADX_LABELS"
+
+# ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+ADX_OS="unknown"
+case "$(uname -s)" in
+    Darwin*) ADX_OS="macos" ;;
+    Linux*)  ADX_OS="linux" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Dependency management
+# ---------------------------------------------------------------------------
+_has() {
+    command -v "$1" &>/dev/null
+}
+
+_pkg_manager() {
+    if _has brew; then echo "brew install"
+    elif _has apt; then echo "sudo apt install"
+    elif _has dnf; then echo "sudo dnf install"
+    elif _has pacman; then echo "sudo pacman -S"
+    elif _has apk; then echo "sudo apk add"
+    else echo ""
+    fi
+}
+
+_check_deps() {
+    local missing=()
+    local install_cmds=()
+    local pm=$(_pkg_manager)
+
+    if ! _has adb; then
+        missing+=("adb")
+        if [[ "$ADX_OS" == "macos" ]]; then
+            install_cmds+=("brew install android-platform-tools")
+        elif [[ -n "$pm" ]]; then
+            install_cmds+=("$pm android-tools")
+        fi
+    fi
+
+    if ! _has fzf; then
+        missing+=("fzf")
+        [[ -n "$pm" ]] && install_cmds+=("$pm fzf")
+    fi
+
+    if [[ "$ADX_OS" == "macos" ]] && ! _has dns-sd; then
+        missing+=("dns-sd")
+        install_cmds+=("# dns-sd should be built into macOS — something is wrong")
+    fi
+
+    if [[ "$ADX_OS" == "linux" ]] && ! _has avahi-browse; then
+        missing+=("avahi-browse")
+        [[ -n "$pm" ]] && install_cmds+=("$pm avahi-utils")
+    fi
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "adx is missing required dependencies:"
+    echo ""
+    for dep in "${missing[@]}"; do
+        echo "  - $dep"
+    done
+    echo ""
+
+    if [[ ${#install_cmds[@]} -gt 0 ]]; then
+        echo "Install with:"
+        echo ""
+        for cmd in "${install_cmds[@]}"; do
+            echo "  $cmd"
+        done
+        echo ""
+        echo -n "Run these now? [y/N] "
+        read -r answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            for cmd in "${install_cmds[@]}"; do
+                [[ "$cmd" == "#"* ]] && continue
+                echo "Running: $cmd"
+                eval "$cmd"
+            done
+            echo ""
+            echo "Dependencies installed. Run 'adx' again."
+        fi
+    else
+        echo "Could not detect package manager. Please install manually."
+    fi
+
+    exit 1
+}
+
+_check_scrcpy() {
+    if ! _has scrcpy; then
+        local pm=$(_pkg_manager)
+        echo "scrcpy is required for mirror commands but not installed."
+        echo ""
+        if [[ -n "$pm" ]]; then
+            echo "Install with:"
+            echo ""
+            echo "  $pm scrcpy"
+            echo ""
+            echo -n "Run now? [y/N] "
+            read -r answer
+            if [[ "$answer" =~ ^[Yy]$ ]]; then
+                eval "$pm scrcpy"
+                echo ""
+                if ! _has scrcpy; then
+                    echo "Installation failed."
+                    exit 1
+                fi
+            else
+                exit 1
+            fi
+        else
+            echo "Please install scrcpy manually: https://github.com/Genymobile/scrcpy"
+            exit 1
+        fi
+    fi
+}
+
+_check_deps
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+_label_for() {
+    local target="$1"
+    grep "^${target}|" "$ADX_LABELS" 2>/dev/null | cut -d'|' -f2 | head -1
+}
+
+_display_name() {
+    local target="$1" dname="$2"
+    local label
+    label=$(_label_for "$target")
+    if [[ -n "$label" ]]; then
+        echo "$label ($target)"
+    elif [[ -n "$dname" ]]; then
+        echo "$dname ($target)"
+    else
+        echo "$target"
+    fi
+}
+
+_add_history() {
+    local target="$1" dname="${2:-}"
+    grep -v "^${target}" "$ADX_HISTORY" > "${ADX_HISTORY}.tmp" 2>/dev/null || true
+    echo "${target}|${dname}|$(date +%s)" > "${ADX_HISTORY}.new"
+    cat "${ADX_HISTORY}.tmp" >> "${ADX_HISTORY}.new"
+    mv "${ADX_HISTORY}.new" "$ADX_HISTORY"
+    rm -f "${ADX_HISTORY}.tmp"
+}
+
+_set_label() {
+    local target="$1" label="$2"
+    grep -v "^${target}|" "$ADX_LABELS" > "${ADX_LABELS}.tmp" 2>/dev/null || true
+    echo "${target}|${label}" >> "${ADX_LABELS}.tmp"
+    mv "${ADX_LABELS}.tmp" "$ADX_LABELS"
+}
+
+# ---------------------------------------------------------------------------
+# mDNS scanning — platform-aware
+# ---------------------------------------------------------------------------
+_mdns_browse() {
+    local service="$1" duration="${2:-3}"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    if [[ "$ADX_OS" == "macos" ]]; then
+        dns-sd -B "$service" . > "$tmpfile" 2>&1 &
+        local pid=$!
+        sleep "$duration"
+        kill $pid 2>/dev/null; wait $pid 2>/dev/null
+        grep "Add" "$tmpfile" | grep -v "^Timestamp" | awk '{print $NF}'
+    else
+        avahi-browse -t -p "$service" 2>/dev/null > "$tmpfile" &
+        local pid=$!
+        sleep "$duration"
+        kill $pid 2>/dev/null; wait $pid 2>/dev/null
+        grep "^=" "$tmpfile" | cut -d';' -f4 | sort -u
+    fi
+
+    rm -f "$tmpfile"
+}
+
+_mdns_resolve() {
+    local instance="$1" service="$2"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    if [[ "$ADX_OS" == "macos" ]]; then
+        dns-sd -L "$instance" "$service" local. > "$tmpfile" 2>&1 &
+        local pid=$!
+        sleep 2
+        kill $pid 2>/dev/null; wait $pid 2>/dev/null
+        cat "$tmpfile"
+    else
+        avahi-browse -t -p -r "$service" 2>/dev/null > "$tmpfile" &
+        local pid=$!
+        sleep 2
+        kill $pid 2>/dev/null; wait $pid 2>/dev/null
+        local block
+        block=$(awk "/=$instance/{found=1} found{print} found && /^$/{exit}" "$tmpfile")
+        echo "$block"
+    fi
+
+    rm -f "$tmpfile"
+}
+
+_mdns_ip() {
+    local hostname="$1"
+
+    if [[ "$ADX_OS" == "macos" ]]; then
+        local tmpfile
+        tmpfile=$(mktemp)
+        dns-sd -G v4 "$hostname" > "$tmpfile" 2>&1 &
+        local pid=$!
+        sleep 2
+        kill $pid 2>/dev/null; wait $pid 2>/dev/null
+        grep -E '^\d.*Add' "$tmpfile" | awk '{print $6}' | head -1
+        rm -f "$tmpfile"
+    else
+        getent hosts "${hostname%.}" 2>/dev/null | awk '{print $1}' | head -1
+    fi
+}
+
+_scan_devices() {
+    local service="${1:-_adb-tls-connect._tcp}"
+    local instances
+    instances=($(_mdns_browse "$service"))
+
+    if [[ ${#instances[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for inst in "${instances[@]}"; do
+        local lookup host port dname ip
+        lookup=$(_mdns_resolve "$inst" "$service")
+
+        if [[ "$ADX_OS" == "macos" ]]; then
+            host=$(echo "$lookup" | grep "can be reached" | sed 's/.*at \(.*\):\([0-9]*\) (.*/\1/')
+            port=$(echo "$lookup" | grep "can be reached" | sed 's/.*:\([0-9]*\) (.*/\1/')
+            dname=$(echo "$lookup" | grep "name=" | sed 's/.*name=\([^ ]*\).*/\1/')
+        else
+            host=$(echo "$lookup" | grep "^=.*" | cut -d';' -f7 | head -1)
+            port=$(echo "$lookup" | grep "^=.*" | cut -d';' -f9 | head -1)
+            dname=$(echo "$lookup" | grep -o 'name=[^ ]*' | cut -d= -f2 | head -1)
+        fi
+
+        [[ -z "$host" || -z "$port" ]] && continue
+
+        ip=$(_mdns_ip "$host")
+        [[ -z "$ip" || "$ip" == "0.0.0.0" ]] && continue
+
+        echo "${ip}:${port}|${dname}"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
+_pick_device() {
+    local prompt="${1:-Select device > }"
+    local multi="${2:-}"
+    local devices=()
+
+    echo "Scanning for devices (3s)..."
+    while IFS='|' read -r target dname; do
+        local display
+        display=$(_display_name "$target" "$dname")
+        devices+=("${display}|${target}|${dname}")
+    done < <(_scan_devices)
+
+    if [[ ${#devices[@]} -eq 0 ]]; then
+        echo "No devices found. Make sure Wireless Debugging is enabled."
+        return 1
+    fi
+
+    echo "Found ${#devices[@]} device(s)."
+
+    local fzf_opts=(--height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="$prompt" --no-scrollbar --color=pointer:green)
+    [[ -n "$multi" ]] && fzf_opts+=(--multi)
+
+    local selected
+    selected=$(printf '%s\n' "${devices[@]}" | cut -d'|' -f1 | fzf "${fzf_opts[@]}")
+    [[ -z "$selected" ]] && return 1
+
+    local results=()
+    while IFS= read -r sel; do
+        for d in "${devices[@]}"; do
+            local display target dname
+            display=$(echo "$d" | cut -d'|' -f1)
+            target=$(echo "$d" | cut -d'|' -f2)
+            dname=$(echo "$d" | cut -d'|' -f3)
+            if [[ "$display" == "$sel" ]]; then
+                results+=("${target}|${dname}")
+            fi
+        done
+    done <<< "$selected"
+
+    printf '%s\n' "${results[@]}"
+}
+
+_connect() {
+    local target="$1" dname="${2:-}"
+    echo "Connecting to $target..."
+    adb connect "$target"
+    _add_history "$target" "$dname"
+}
+
+_do_scan_connect() {
+    local multi="${1:-}"
+    local picked
+    picked=$(_pick_device "Connect > " "$multi") || return 1
+
+    while IFS='|' read -r target dname; do
+        _connect "$target" "$dname"
+    done <<< "$picked"
+}
+
+_do_scan_mirror() {
+    _check_scrcpy
+    local picked
+    picked=$(_pick_device "Mirror > ") || return 1
+
+    local target dname
+    target=$(echo "$picked" | head -1 | cut -d'|' -f1)
+    dname=$(echo "$picked" | head -1 | cut -d'|' -f2)
+
+    _connect "$target" "$dname"
+    sleep 1
+    echo "Launching scrcpy..."
+    scrcpy -s "$target" &>/dev/null &
+    disown
+}
+
+_do_reconnect() {
+    local mirror="${1:-}"
+    if [[ ! -s "$ADX_HISTORY" ]]; then
+        echo "No connection history."
+        return 1
+    fi
+
+    [[ "$mirror" == "mirror" ]] && _check_scrcpy
+
+    local entries=()
+    while IFS='|' read -r target dname ts; do
+        local display
+        display=$(_display_name "$target" "$dname")
+        entries+=("$display")
+    done < "$ADX_HISTORY"
+
+    local selected
+    selected=$(printf '%s\n' "${entries[@]}" | fzf --height=$((${#entries[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Reconnect > " --no-scrollbar --color=pointer:green)
+    [[ -z "$selected" ]] && return 0
+
+    local target
+    target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
+    [[ -z "$target" ]] && { echo "Could not parse address."; return 1; }
+
+    _connect "$target"
+
+    if [[ "$mirror" == "mirror" ]]; then
+        sleep 1
+        echo "Launching scrcpy..."
+        scrcpy -s "$target" &>/dev/null &
+        disown
+    fi
+}
+
+_do_pair() {
+    echo "Scanning for devices in pairing mode (5s)..."
+    local instances
+    instances=($(_mdns_browse "_adb-tls-pairing._tcp" 5))
+
+    if [[ ${#instances[@]} -eq 0 ]]; then
+        echo "No devices in pairing mode found."
+        echo "On your device: Settings > Developer Options > Wireless Debugging > Pair device with pairing code"
+        return 1
+    fi
+
+    local devices=()
+    for inst in "${instances[@]}"; do
+        local lookup host port dname ip
+        lookup=$(_mdns_resolve "$inst" "_adb-tls-pairing._tcp")
+
+        if [[ "$ADX_OS" == "macos" ]]; then
+            host=$(echo "$lookup" | grep "can be reached" | sed 's/.*at \(.*\):\([0-9]*\) (.*/\1/')
+            port=$(echo "$lookup" | grep "can be reached" | sed 's/.*:\([0-9]*\) (.*/\1/')
+            dname=$(echo "$lookup" | grep "name=" | sed 's/.*name=\([^ ]*\).*/\1/')
+        else
+            host=$(echo "$lookup" | grep "^=.*" | cut -d';' -f7 | head -1)
+            port=$(echo "$lookup" | grep "^=.*" | cut -d';' -f9 | head -1)
+            dname=$(echo "$lookup" | grep -o 'name=[^ ]*' | cut -d= -f2 | head -1)
+        fi
+
+        [[ -z "$host" || -z "$port" ]] && continue
+
+        ip=$(_mdns_ip "$host")
+        [[ -z "$ip" || "$ip" == "0.0.0.0" ]] && continue
+
+        local label="${dname:-$inst}"
+        devices+=("$label ($ip:$port)")
+    done
+
+    if [[ ${#devices[@]} -eq 0 ]]; then
+        echo "Found devices but couldn't resolve addresses."
+        return 1
+    fi
+
+    local selected
+    selected=$(printf '%s\n' "${devices[@]}" | fzf --height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Pair > " --no-scrollbar --color=pointer:green)
+    [[ -z "$selected" ]] && return 0
+
+    local target
+    target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
+    echo -n "Pairing code: "
+    read -r code
+    [[ -z "$code" ]] && { echo "No code provided."; return 1; }
+
+    adb pair "$target" "$code"
+}
+
+_do_status() {
+    adb devices -l
+}
+
+_do_disconnect() {
+    local connected
+    connected=$(adb devices | grep -v "^List\|^$" | awk '{print $1}')
+    if [[ -z "$connected" ]]; then
+        echo "No connected devices."
+        return 0
+    fi
+
+    local entries=("Disconnect all")
+    while IFS= read -r dev; do
+        local label
+        label=$(_label_for "$dev")
+        if [[ -n "$label" ]]; then
+            entries+=("$label ($dev)")
+        else
+            entries+=("$dev")
+        fi
+    done <<< "$connected"
+
+    local selected
+    selected=$(printf '%s\n' "${entries[@]}" | fzf --height=$((${#entries[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Disconnect > " --no-scrollbar --color=pointer:green)
+    [[ -z "$selected" ]] && return 0
+
+    if [[ "$selected" == "Disconnect all" ]]; then
+        adb disconnect
+        echo "Disconnected all devices."
+    else
+        local target
+        target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
+        adb disconnect "$target"
+        echo "Disconnected $selected."
+    fi
+}
+
+_do_label() {
+    echo -n "IP:Port (e.g. 10.1.4.90:35565): "
+    read -r target
+    [[ -z "$target" ]] && return 1
+    echo -n "Label: "
+    read -r label
+    [[ -z "$label" ]] && return 1
+    _set_label "$target" "$label"
+    echo "Labeled $target as '$label'."
+}
+
+# ---------------------------------------------------------------------------
+# Self-update
+# ---------------------------------------------------------------------------
+_do_upgrade() {
+    echo "Checking for updates..."
+
+    if ! _has curl; then
+        echo "curl is required for upgrades."
+        return 1
+    fi
+
+    local latest
+    latest=$(curl -fsSL "https://api.github.com/repos/${ADX_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+
+    if [[ -z "$latest" ]]; then
+        echo "Could not check for updates. Are you online?"
+        return 1
+    fi
+
+    if [[ "$latest" == "$ADX_VERSION" ]]; then
+        echo "Already on latest version ($ADX_VERSION)."
+        return 0
+    fi
+
+    echo "Current: $ADX_VERSION"
+    echo "Latest:  $latest"
+    echo ""
+    echo -n "Upgrade? [y/N] "
+    read -r answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+        return 0
+    fi
+
+    local self_path
+    self_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+    local download_url="https://raw.githubusercontent.com/${ADX_REPO}/v${latest}/bin/adx"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    if curl -fsSL "$download_url" -o "$tmpfile"; then
+        chmod +x "$tmpfile"
+        if mv "$tmpfile" "$self_path" 2>/dev/null; then
+            echo "Upgraded to v${latest}."
+        else
+            echo "Need permissions to write to $self_path"
+            sudo mv "$tmpfile" "$self_path"
+            echo "Upgraded to v${latest}."
+        fi
+    else
+        rm -f "$tmpfile"
+        echo "Download failed."
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+_main() {
+    if [[ "${1:-}" == "--version" || "${1:-}" == "-v" ]]; then
+        echo "adx $ADX_VERSION"
+        return 0
+    fi
+
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "adx — Android Developer eXperience"
+        echo ""
+        echo "Usage: adx [command]"
+        echo ""
+        echo "Commands:"
+        echo "  scan        Scan & connect to a device"
+        echo "  mirror      Scan, connect & launch scrcpy"
+        echo "  reconnect   Reconnect to a previous device"
+        echo "  remirror    Reconnect & launch scrcpy"
+        echo "  pair        Pair a new device"
+        echo "  status      Show connected devices"
+        echo "  disconnect  Disconnect devices"
+        echo "  label       Assign a friendly name to a device"
+        echo "  upgrade     Update adx to the latest version"
+        echo ""
+        echo "Run without arguments for interactive menu."
+        return 0
+    fi
+
+    local cmd="${1:-}"
+
+    if [[ -n "$cmd" ]]; then
+        case "$cmd" in
+            scan)       _do_scan_connect ;;
+            mirror)     _do_scan_mirror ;;
+            reconnect)  _do_reconnect ;;
+            remirror)   _do_reconnect mirror ;;
+            pair)       _do_pair ;;
+            status)     _do_status ;;
+            disconnect) _do_disconnect ;;
+            label)      _do_label ;;
+            upgrade)    _do_upgrade ;;
+            *)          echo "Unknown command: $cmd. Run 'adx --help' for usage."; return 1 ;;
+        esac
+        return $?
+    fi
+
+    local choice
+    choice=$(printf "Scan & Connect\nScan & Mirror\nReconnect\nReconnect & Mirror\nPair\nStatus\nDisconnect\nLabel Device\nUpgrade" | fzf --height=13 --layout=reverse --no-info --no-sort --prompt="adx > " --no-scrollbar --color=pointer:green)
+
+    [[ -z "$choice" ]] && return 0
+
+    case "$choice" in
+        "Scan & Connect")       _do_scan_connect ;;
+        "Scan & Mirror")        _do_scan_mirror ;;
+        "Reconnect")            _do_reconnect ;;
+        "Reconnect & Mirror")   _do_reconnect mirror ;;
+        "Pair")                 _do_pair ;;
+        "Status")               _do_status ;;
+        "Disconnect")           _do_disconnect ;;
+        "Label Device")         _do_label ;;
+        "Upgrade")              _do_upgrade ;;
+    esac
+}
+
+_main "$@"
