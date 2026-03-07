@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.0.1"
+ADX_VERSION="1.0.2"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -486,18 +486,133 @@ _do_label() {
 }
 
 # ---------------------------------------------------------------------------
-# Self-update
+# Update check + self-update
 # ---------------------------------------------------------------------------
-_do_upgrade() {
-    echo "Checking for updates..."
+ADX_LAST_CHECK="${ADX_DIR}/last_update_check"
+ADX_LATEST_CACHE="${ADX_DIR}/latest_version"
 
+_check_for_update() {
+    _has curl || return 0
+
+    local now
+    now=$(date +%s)
+    local last_check=0
+    [[ -f "$ADX_LAST_CHECK" ]] && last_check=$(cat "$ADX_LAST_CHECK" 2>/dev/null || echo 0)
+    local elapsed=$((now - last_check))
+
+    # Check once per day (86400 seconds)
+    [[ $elapsed -lt 86400 ]] && {
+        # Show cached hint if available
+        if [[ -f "$ADX_LATEST_CACHE" ]]; then
+            local cached
+            cached=$(cat "$ADX_LATEST_CACHE")
+            [[ -n "$cached" && "$cached" != "$ADX_VERSION" ]] && echo "adx v${cached} available — run 'adx upgrade' to update" >&2
+        fi
+        return 0
+    }
+
+    # Background check — don't slow down startup
+    (
+        local latest
+        latest=$(curl -fsSL --connect-timeout 3 "https://api.github.com/repos/${ADX_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+        if [[ -n "$latest" ]]; then
+            echo "$now" > "$ADX_LAST_CHECK"
+            echo "$latest" > "$ADX_LATEST_CACHE"
+            [[ "$latest" != "$ADX_VERSION" ]] && echo "adx v${latest} available — run 'adx upgrade' to update" >&2
+        fi
+    ) &
+    disown
+}
+
+_fetch_latest_version() {
+    curl -fsSL "https://api.github.com/repos/${ADX_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/'
+}
+
+_fetch_all_versions() {
+    curl -fsSL "https://api.github.com/repos/${ADX_REPO}/releases" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/'
+}
+
+_install_version() {
+    local version="$1"
+    local self_path
+    self_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+    local download_url="https://raw.githubusercontent.com/${ADX_REPO}/v${version}/bin/adx"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    if curl -fsSL "$download_url" -o "$tmpfile"; then
+        chmod +x "$tmpfile"
+        if mv "$tmpfile" "$self_path" 2>/dev/null; then
+            echo "Switched to v${version}."
+        else
+            echo "Need permissions to write to $self_path"
+            sudo mv "$tmpfile" "$self_path"
+            echo "Switched to v${version}."
+        fi
+        # Update cache so we don't nag after intentional downgrade
+        echo "$version" > "$ADX_LATEST_CACHE"
+    else
+        rm -f "$tmpfile"
+        echo "Download failed."
+        return 1
+    fi
+}
+
+_do_upgrade() {
     if ! _has curl; then
         echo "curl is required for upgrades."
         return 1
     fi
 
+    # adx upgrade --list — pick any version
+    if [[ "${1:-}" == "--list" ]]; then
+        echo "Fetching versions..."
+        local versions
+        versions=($(_fetch_all_versions))
+
+        if [[ ${#versions[@]} -eq 0 ]]; then
+            echo "Could not fetch versions. Are you online?"
+            return 1
+        fi
+
+        # Mark current version
+        local display=()
+        for v in "${versions[@]}"; do
+            if [[ "$v" == "$ADX_VERSION" ]]; then
+                display+=("$v (current)")
+            else
+                display+=("$v")
+            fi
+        done
+
+        local selected
+        selected=$(printf '%s\n' "${display[@]}" | fzf --height=$((${#display[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Version > " --no-scrollbar --color=pointer:green)
+        [[ -z "$selected" ]] && return 0
+
+        local target_version
+        target_version=$(echo "$selected" | awk '{print $1}')
+
+        if [[ "$target_version" == "$ADX_VERSION" ]]; then
+            echo "Already on v${ADX_VERSION}."
+            return 0
+        fi
+
+        echo "Current: $ADX_VERSION"
+        echo "Target:  $target_version"
+        echo ""
+        echo -n "Switch? [y/N] "
+        read -r answer
+        [[ ! "$answer" =~ ^[Yy]$ ]] && return 0
+
+        _install_version "$target_version"
+        return $?
+    fi
+
+    # adx upgrade — latest version
+    echo "Checking for updates..."
+
     local latest
-    latest=$(curl -fsSL "https://api.github.com/repos/${ADX_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+    latest=$(_fetch_latest_version)
 
     if [[ -z "$latest" ]]; then
         echo "Could not check for updates. Are you online?"
@@ -514,30 +629,9 @@ _do_upgrade() {
     echo ""
     echo -n "Upgrade? [y/N] "
     read -r answer
-    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-        return 0
-    fi
+    [[ ! "$answer" =~ ^[Yy]$ ]] && return 0
 
-    local self_path
-    self_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
-    local download_url="https://raw.githubusercontent.com/${ADX_REPO}/v${latest}/bin/adx"
-
-    local tmpfile
-    tmpfile=$(mktemp)
-    if curl -fsSL "$download_url" -o "$tmpfile"; then
-        chmod +x "$tmpfile"
-        if mv "$tmpfile" "$self_path" 2>/dev/null; then
-            echo "Upgraded to v${latest}."
-        else
-            echo "Need permissions to write to $self_path"
-            sudo mv "$tmpfile" "$self_path"
-            echo "Upgraded to v${latest}."
-        fi
-    else
-        rm -f "$tmpfile"
-        echo "Download failed."
-        return 1
-    fi
+    _install_version "$latest"
 }
 
 # ---------------------------------------------------------------------------
@@ -564,10 +658,13 @@ _main() {
         echo "  disconnect  Disconnect devices"
         echo "  label       Assign a friendly name to a device"
         echo "  upgrade     Update adx to the latest version"
+        echo "  upgrade --list  Pick any version to install"
         echo ""
         echo "Run without arguments for interactive menu."
         return 0
     fi
+
+    _check_for_update
 
     local cmd="${1:-}"
 
@@ -581,7 +678,7 @@ _main() {
             status)     _do_status ;;
             disconnect) _do_disconnect ;;
             label)      _do_label ;;
-            upgrade)    _do_upgrade ;;
+            upgrade)    shift; _do_upgrade "$@" ;;
             *)          echo "Unknown command: $cmd. Run 'adx --help' for usage."; return 1 ;;
         esac
         return $?
