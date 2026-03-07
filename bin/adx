@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.1.1"
+ADX_VERSION="1.1.2"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -117,9 +117,9 @@ _check_deps() {
             _print "    ${CYAN}${cmd}${RESET}"
         done
         echo ""
-        printf "  Run now? ${DIM}[y/N]${RESET} "
+        printf "  Run now? ${DIM}[Y/n]${RESET} "
         read -r -n 1 answer; echo
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
+        if [[ ! "$answer" =~ ^[Nn]$ ]]; then
             for cmd in "${install_cmds[@]}"; do
                 [[ "$cmd" == "#"* ]] && continue
                 _info "Running: $cmd"
@@ -143,9 +143,9 @@ _check_scrcpy() {
         if [[ -n "$pm" ]]; then
             _print "  Install with: ${CYAN}$pm scrcpy${RESET}"
             echo ""
-            printf "  Run now? ${DIM}[y/N]${RESET} "
+            printf "  Run now? ${DIM}[Y/n]${RESET} "
             read -r -n 1 answer; echo
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
+            if [[ ! "$answer" =~ ^[Nn]$ ]]; then
                 eval "$pm scrcpy"
                 echo ""
                 if ! _has scrcpy; then
@@ -771,9 +771,9 @@ _do_upgrade() {
         _print "  Current: ${DIM}$ADX_VERSION${RESET}"
         _print "  Target:  ${BOLD}$target_version${RESET}"
         echo ""
-        printf "  Switch? ${DIM}[y/N]${RESET} "
+        printf "  Switch? ${DIM}[Y/n]${RESET} "
         read -r -n 1 answer; echo
-        [[ ! "$answer" =~ ^[Yy]$ ]] && return 0
+        [[ "$answer" =~ ^[Nn]$ ]] && return 0
 
         _install_version "$target_version"
         return $?
@@ -802,9 +802,9 @@ _do_upgrade() {
     _print "  Current: ${DIM}$ADX_VERSION${RESET}"
     _print "  Latest:  ${GREEN}${BOLD}$latest${RESET}"
     echo ""
-    printf "  Upgrade? ${DIM}[y/N]${RESET} "
+    printf "  Upgrade? ${DIM}[Y/n]${RESET} "
     read -r -n 1 answer; echo
-    [[ ! "$answer" =~ ^[Yy]$ ]] && return 0
+    [[ "$answer" =~ ^[Nn]$ ]] && return 0
 
     _install_version "$latest"
 }
@@ -922,11 +922,11 @@ _main() {
         local choice
         choice=$(_build_menu | fzf --height=20 --layout=reverse --no-info --no-sort --prompt="  " --no-scrollbar --color=pointer:green --ansi --delimiter='\n')
 
-        [[ -z "$choice" ]] && { echo ""; return 0; }
+        [[ -z "$choice" ]] && continue
 
-        # Strip ANSI codes and leading spaces for matching
+        # Strip ANSI codes, leading spaces, hints for matching
         local clean
-        clean=$(echo "$choice" | sed "s/$(printf '\033')\[[0-9;]*m//g" | sed 's/^  //' | sed 's/ →.*//')
+        clean=$(echo "$choice" | sed "s/$(printf '\033')\[[0-9;]*m//g" | sed 's/^  //' | sed 's/ →.*//' | sed 's/ (.*//')
 
         echo ""
 
