@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.2.0"
+ADX_VERSION="1.2.1"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -436,14 +436,13 @@ _pick_device() {
 }
 
 _do_inline_pair() {
-    _info "Device needs to be paired first (one-time setup)"
     _info "On your device: ${BOLD}Settings > Developer Options > Wireless Debugging > Pair device with pairing code${RESET}"
     echo ""
-    printf "  Pairing IP:port (shown on device): "
-    read -r pair_target
+    printf "  Pairing IP:port (shown on device): " >&2
+    read -r pair_target </dev/tty
     [[ -z "$pair_target" ]] && { _error "No address provided"; return 1; }
-    printf "  Pairing code (6 digits): "
-    read -r pair_code
+    printf "  Pairing code (6 digits): " >&2
+    read -r pair_code </dev/tty
     [[ -z "$pair_code" ]] && { _error "No code provided"; return 1; }
 
     local result
@@ -465,18 +464,28 @@ _connect() {
         if echo "$result" | grep -q "connected"; then
             _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
         else
-            _warn "Could not connect to ${BOLD}$target${RESET}"
+            _error "Failed to connect to ${BOLD}$target${RESET}"
             _info "$result"
             echo ""
-            _do_inline_pair || return 1
-            echo ""
-            _info "Retrying connection..."
-            result=$(adb connect "$target" 2>&1)
-            if echo "$result" | grep -q "connected"; then
-                _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
+            _info "Is this a new device that hasn't been paired yet?"
+            printf "  Pair now? [y/N] " >&2
+            local yn
+            read -r yn </dev/tty
+            if [[ "$yn" =~ ^[Yy]$ ]]; then
+                echo ""
+                _do_inline_pair || return 1
+                echo ""
+                _info "Retrying connection..."
+                result=$(adb connect "$target" 2>&1)
+                if echo "$result" | grep -q "connected"; then
+                    _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
+                else
+                    _error "Still could not connect: $result"
+                    _info "Make sure the IP:port is from the Wireless Debugging screen (not the pairing port)"
+                    return 1
+                fi
             else
-                _error "Still could not connect: $result"
-                _info "Make sure the IP:port is from the Wireless Debugging screen (not the pairing port)"
+                _info "Check that Wireless Debugging is enabled and the IP:port is correct"
                 return 1
             fi
         fi
