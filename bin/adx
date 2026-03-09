@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.2.2"
+ADX_VERSION="1.2.3"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -440,10 +440,22 @@ _do_inline_pair() {
     _info "Device needs to be paired first (one-time setup)"
     _info "On your device: ${BOLD}Settings > Developer Options > Wireless Debugging > Pair device with pairing code${RESET}"
     echo ""
-    local pair_target prefill=""
-    [[ -n "$known_ip" ]] && prefill="${known_ip}:"
-    printf "  Pairing IP:port ${DIM}(e.g. 192.168.1.5:37869)${RESET}: " >&2
-    read -r -e -i "$prefill" pair_target </dev/tty
+    local pair_target
+    if [[ -n "$known_ip" && "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+        # bash 4+: editable prefill
+        printf "  Pairing IP:port ${DIM}(e.g. 192.168.1.5:37869)${RESET}: " >&2
+        read -r -e -i "${known_ip}:" pair_target </dev/tty
+    elif [[ -n "$known_ip" ]]; then
+        # bash 3.2: show IP, ask for port only
+        printf "  Pairing port ${DIM}(IP: ${known_ip})${RESET}: " >&2
+        local pair_port
+        read -r pair_port </dev/tty
+        [[ -z "$pair_port" ]] && { _error "No port provided"; return 1; }
+        pair_target="${known_ip}:${pair_port}"
+    else
+        printf "  Pairing IP:port ${DIM}(e.g. 192.168.1.5:37869)${RESET}: " >&2
+        read -r pair_target </dev/tty
+    fi
     [[ -z "$pair_target" ]] && { _error "No address provided"; return 1; }
     if [[ ! "$pair_target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
         _error "Invalid format. Enter the full IP:port (e.g. 192.168.1.5:37869)"
@@ -472,19 +484,28 @@ _connect() {
         if echo "$result" | grep -q "connected"; then
             _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
         else
-            _warn "Could not connect to ${BOLD}$target${RESET}"
+            _error "Failed to connect to ${BOLD}$target${RESET}"
             _info "$result"
             echo ""
-            local connect_ip="${target%%:*}"
-            _do_inline_pair "$connect_ip" || return 1
-            echo ""
-            _info "Retrying connection..."
-            result=$(adb connect "$target" 2>&1)
-            if echo "$result" | grep -q "connected"; then
-                _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
+            printf "  Pair this device? [y/N] " >&2
+            local yn
+            read -r yn </dev/tty
+            if [[ "$yn" =~ ^[Yy]$ ]]; then
+                echo ""
+                local connect_ip="${target%%:*}"
+                _do_inline_pair "$connect_ip" || return 1
+                echo ""
+                _info "Retrying connection..."
+                result=$(adb connect "$target" 2>&1)
+                if echo "$result" | grep -q "connected"; then
+                    _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
+                else
+                    _error "Still could not connect: $result"
+                    _info "Make sure the IP:port is from the Wireless Debugging screen (not the pairing port)"
+                    return 1
+                fi
             else
-                _error "Still could not connect: $result"
-                _info "Make sure the IP:port is from the Wireless Debugging screen (not the pairing port)"
+                _info "Check that Wireless Debugging is enabled and the IP:port is correct"
                 return 1
             fi
         fi
