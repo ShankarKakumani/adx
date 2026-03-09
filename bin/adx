@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.2.3"
+ADX_VERSION="1.2.4"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -445,15 +445,10 @@ _do_inline_pair() {
         # bash 4+: editable prefill
         printf "  Pairing IP:port ${DIM}(e.g. 192.168.1.5:37869)${RESET}: " >&2
         read -r -e -i "${known_ip}:" pair_target </dev/tty
-    elif [[ -n "$known_ip" ]]; then
-        # bash 3.2: show IP, ask for port only
-        printf "  Pairing port ${DIM}(IP: ${known_ip})${RESET}: " >&2
-        local pair_port
-        read -r pair_port </dev/tty
-        [[ -z "$pair_port" ]] && { _error "No port provided"; return 1; }
-        pair_target="${known_ip}:${pair_port}"
     else
-        printf "  Pairing IP:port ${DIM}(e.g. 192.168.1.5:37869)${RESET}: " >&2
+        local hint="e.g. 192.168.1.5:37869"
+        [[ -n "$known_ip" ]] && hint="e.g. ${known_ip}:37869"
+        printf "  Pairing IP:port ${DIM}(${hint})${RESET}: " >&2
         read -r pair_target </dev/tty
     fi
     [[ -z "$pair_target" ]] && { _error "No address provided"; return 1; }
