@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.1.5"
+ADX_VERSION="1.2.0"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -373,10 +373,9 @@ _pick_device() {
     if [[ ${#devices[@]} -gt 0 ]]; then
         fzf_header="Enter IP:port (e.g. 192.168.1.5:37000) or select a device"
     else
-        fzf_header="$(printf '%s\n%s\n%s' \
+        fzf_header="$(printf '%s\n%s' \
             "No paired devices found. Enter IP:port to connect manually" \
-            "  → Find it: Settings > Developer Options > Wireless Debugging" \
-            "  → New device? Pair first with: adx pair")"
+            "  → Find it: Settings > Developer Options > Wireless Debugging > IP address & Port")"
     fi
 
     local fzf_height=$(( ${#devices[@]} + 6 ))
@@ -436,6 +435,28 @@ _pick_device() {
     return 1
 }
 
+_do_inline_pair() {
+    _info "Device needs to be paired first (one-time setup)"
+    _info "On your device: ${BOLD}Settings > Developer Options > Wireless Debugging > Pair device with pairing code${RESET}"
+    echo ""
+    printf "  Pairing IP:port (shown on device): "
+    read -r pair_target
+    [[ -z "$pair_target" ]] && { _error "No address provided"; return 1; }
+    printf "  Pairing code (6 digits): "
+    read -r pair_code
+    [[ -z "$pair_code" ]] && { _error "No code provided"; return 1; }
+
+    local result
+    result=$(adb pair "$pair_target" "$pair_code" 2>&1)
+    if echo "$result" | grep -qi "success"; then
+        _success "Paired successfully!"
+        return 0
+    else
+        _error "Pairing failed: $result"
+        return 1
+    fi
+}
+
 _connect() {
     local target="$1" dname="${2:-}"
     if [[ "$target" == *":"* ]]; then
@@ -444,7 +465,20 @@ _connect() {
         if echo "$result" | grep -q "connected"; then
             _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
         else
-            _error "Failed: $result"
+            _warn "Could not connect to ${BOLD}$target${RESET}"
+            _info "$result"
+            echo ""
+            _do_inline_pair || return 1
+            echo ""
+            _info "Retrying connection..."
+            result=$(adb connect "$target" 2>&1)
+            if echo "$result" | grep -q "connected"; then
+                _success "Connected to ${BOLD}${dname:-$target}${RESET} ${DIM}($target)${RESET}"
+            else
+                _error "Still could not connect: $result"
+                _info "Make sure the IP:port is from the Wireless Debugging screen (not the pairing port)"
+                return 1
+            fi
         fi
         _add_history "$target" "$dname"
     else
@@ -458,7 +492,7 @@ _do_scan_connect() {
     picked=$(_pick_device "Connect > " "$multi") || return 1
 
     while IFS='|' read -r target dname; do
-        _connect "$target" "$dname"
+        _connect "$target" "$dname" || return 1
     done <<< "$picked"
 }
 
@@ -471,7 +505,7 @@ _do_scan_mirror() {
     target=$(echo "$picked" | head -1 | cut -d'|' -f1)
     dname=$(echo "$picked" | head -1 | cut -d'|' -f2)
 
-    _connect "$target" "$dname"
+    _connect "$target" "$dname" || return 1
     sleep 1
     _success "Launching scrcpy..."
     scrcpy -s "$target" &>/dev/null &
@@ -502,80 +536,13 @@ _do_reconnect() {
     target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
     [[ -z "$target" ]] && { _error "Could not parse address"; return 1; }
 
-    _connect "$target"
+    _connect "$target" || return 1
 
     if [[ "$mirror" == "mirror" ]]; then
         sleep 1
         _success "Launching scrcpy..."
         scrcpy -s "$target" &>/dev/null &
         disown
-    fi
-}
-
-_do_pair() {
-    local scan_tmp
-    scan_tmp=$(mktemp)
-    _mdns_browse "_adb-tls-pairing._tcp" 5 > "$scan_tmp" &
-    local scan_pid=$!
-    _spinner $scan_pid "Looking for devices in pairing mode..."
-
-    local instances
-    instances=($(cat "$scan_tmp"))
-    rm -f "$scan_tmp"
-
-    if [[ ${#instances[@]} -eq 0 ]]; then
-        _error "No devices in pairing mode"
-        _info "On your device: Settings > Developer Options > Wireless Debugging > Pair device with pairing code"
-        return 1
-    fi
-
-    local devices=()
-    for inst in "${instances[@]}"; do
-        local lookup host port dname ip
-        lookup=$(_mdns_resolve "$inst" "_adb-tls-pairing._tcp")
-
-        if [[ "$ADX_OS" == "macos" ]]; then
-            host=$(echo "$lookup" | grep "can be reached" | sed 's/.*at \(.*\):\([0-9]*\) (.*/\1/')
-            port=$(echo "$lookup" | grep "can be reached" | sed 's/.*:\([0-9]*\) (.*/\1/')
-            dname=$(echo "$lookup" | grep "name=" | sed 's/.*name=\([^ ]*\).*/\1/')
-        else
-            host=$(echo "$lookup" | grep "^=.*" | cut -d';' -f7 | head -1)
-            port=$(echo "$lookup" | grep "^=.*" | cut -d';' -f9 | head -1)
-            dname=$(echo "$lookup" | grep -o 'name=[^ ]*' | cut -d= -f2 | head -1)
-        fi
-
-        [[ -z "$host" || -z "$port" ]] && continue
-
-        ip=$(_mdns_ip "$host")
-        [[ -z "$ip" || "$ip" == "0.0.0.0" ]] && continue
-
-        local label="${dname:-$inst}"
-        devices+=("$label ($ip:$port)")
-    done
-
-    if [[ ${#devices[@]} -eq 0 ]]; then
-        _error "Found devices but couldn't resolve addresses"
-        return 1
-    fi
-
-    _success "Found ${BOLD}${#devices[@]}${RESET} device(s) in pairing mode"
-
-    local selected
-    selected=$(printf '%s\n' "${devices[@]}" | fzf --height=$((${#devices[@]} + 2)) --layout=reverse --no-info --no-sort --prompt="Pair > " --no-scrollbar --color=pointer:green)
-    [[ -z "$selected" ]] && return 0
-
-    local target
-    target=$(echo "$selected" | grep -o '[0-9.]*:[0-9]*')
-    printf "  Pairing code: "
-    read -r code
-    [[ -z "$code" ]] && { _error "No code provided"; return 1; }
-
-    local result
-    result=$(adb pair "$target" "$code" 2>&1)
-    if echo "$result" | grep -qi "success"; then
-        _success "Paired successfully"
-    else
-        _error "$result"
     fi
 }
 
@@ -889,7 +856,6 @@ _build_menu() {
     printf "${BOLD}CONNECT${RESET}\n"
     printf "  Scan & Connect\n"
     printf "  Scan & Mirror\n"
-    printf "  Pair\n"
 
     if [[ -n "$last_target" ]]; then
         printf "${BOLD}QUICK${RESET}\n"
@@ -931,7 +897,6 @@ _main() {
         _print "    ${CYAN}mirror${RESET}          Scan, connect & launch scrcpy"
         _print "    ${CYAN}reconnect${RESET}       Reconnect to a previous device"
         _print "    ${CYAN}remirror${RESET}        Reconnect & launch scrcpy"
-        _print "    ${CYAN}pair${RESET}            Pair a new device"
         _print "    ${CYAN}status${RESET}          Show connected devices"
         _print "    ${CYAN}disconnect${RESET}      Disconnect devices"
         _print "    ${CYAN}label${RESET}           Assign a friendly name to a device"
@@ -953,7 +918,6 @@ _main() {
             mirror)     _do_scan_mirror ;;
             reconnect)  _do_reconnect ;;
             remirror)   _do_reconnect mirror ;;
-            pair)       _do_pair ;;
             status)     _do_status ;;
             disconnect) _do_disconnect ;;
             label)      _do_label ;;
@@ -980,7 +944,6 @@ _main() {
         case "$clean" in
             "Scan & Connect")       _do_scan_connect ;;
             "Scan & Mirror")        _do_scan_mirror ;;
-            "Pair")                 _do_pair ;;
             "Reconnect")            _do_reconnect ;;
             "Reconnect & Mirror")   _do_reconnect mirror ;;
             "Status")               _do_status ;;
