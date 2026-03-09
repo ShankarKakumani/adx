@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ADX_VERSION="1.1.4"
+ADX_VERSION="1.1.5"
 ADX_REPO="ShankarKakumani/adx"
 ADX_DIR="${HOME}/.adx"
 ADX_HISTORY="${ADX_DIR}/history"
@@ -342,13 +342,13 @@ _pick_device() {
     done < <(_get_adb_devices)
 
     # Wait for mDNS scan with spinner
-    _spinner $scan_pid "Scanning network..."
+    _spinner $scan_pid "Auto-scanning for paired devices..."
 
     # Add mDNS-discovered devices
     while IFS='|' read -r target dname; do
         [[ -z "$target" ]] && continue
         local already=0
-        for s in "${seen[@]}"; do
+        for s in ${seen[@]+"${seen[@]}"}; do
             [[ "$s" == "$target" ]] && { already=1; break; }
         done
         [[ $already -eq 1 ]] && continue
@@ -358,37 +358,82 @@ _pick_device() {
     done < "$scan_tmp"
     rm -f "$scan_tmp"
 
-    if [[ ${#devices[@]} -eq 0 ]]; then
-        _error "No devices found"
-        _info "Make sure Wireless Debugging is enabled or a device is plugged in"
-        return 1
+    if [[ ${#devices[@]} -gt 0 ]]; then
+        _success "Found ${BOLD}${#devices[@]}${RESET} device(s)" >&2
     fi
 
-    _success "Found ${BOLD}${#devices[@]}${RESET} device(s)" >&2
+    # fzf with --print-query: user can type IP:port OR pick a scanned device
+    local fzf_input=""
+    if [[ ${#devices[@]} -gt 0 ]]; then
+        fzf_input=$(printf '%s\n' "${devices[@]}" | cut -d'|' -f1)
+    fi
 
-    local fzf_height=$((${#devices[@]} + 2))
+    # Build header based on whether devices were found
+    local fzf_header
+    if [[ ${#devices[@]} -gt 0 ]]; then
+        fzf_header="Enter IP:port (e.g. 192.168.1.5:37000) or select a device"
+    else
+        fzf_header="$(printf '%s\n%s\n%s' \
+            "No paired devices found. Enter IP:port to connect manually" \
+            "  → Find it: Settings > Developer Options > Wireless Debugging" \
+            "  → New device? Pair first with: adx pair")"
+    fi
+
+    local fzf_height=$(( ${#devices[@]} + 6 ))
     [[ $fzf_height -lt 10 ]] && fzf_height=10
-    local fzf_opts=(--height=$fzf_height --layout=reverse --no-info --no-sort --prompt="$prompt" --color=pointer:green)
+    local fzf_opts=(
+        --height=$fzf_height --layout=reverse --no-info --no-sort
+        --print-query
+        --prompt="$prompt"
+        --header="$fzf_header"
+        --color=pointer:green,header:dim
+    )
     [[ -n "$multi" ]] && fzf_opts+=(--multi)
 
-    local selected
-    selected=$(printf '%s\n' "${devices[@]}" | cut -d'|' -f1 | fzf "${fzf_opts[@]}")
-    [[ -z "$selected" ]] && return 1
+    local fzf_out query selected
+    fzf_out=$(printf '%s' "$fzf_input" | fzf "${fzf_opts[@]}") || {
+        # fzf exits 1 on no match — check if user typed a valid IP
+        query=$(echo "$fzf_out" | head -1)
+        if [[ -n "$query" && "$query" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+            local manual_target="$query"
+            [[ "$manual_target" != *":"* ]] && manual_target="${manual_target}:5555"
+            echo "${manual_target}|manual"
+            return 0
+        fi
+        return 1
+    }
 
-    local results=()
-    while IFS= read -r sel; do
-        for d in "${devices[@]}"; do
-            local display target dname
-            display=$(echo "$d" | cut -d'|' -f1)
-            target=$(echo "$d" | cut -d'|' -f2)
-            dname=$(echo "$d" | cut -d'|' -f3)
-            if [[ "$display" == "$sel" ]]; then
-                results+=("${target}|${dname}")
-            fi
-        done
-    done <<< "$selected"
+    # --print-query: line 1 = typed query, remaining lines = selected item(s)
+    query=$(echo "$fzf_out" | head -1)
+    selected=$(echo "$fzf_out" | tail -n +2)
 
-    printf '%s\n' "${results[@]}"
+    # User selected a scanned device
+    if [[ -n "$selected" ]]; then
+        local results=()
+        while IFS= read -r sel; do
+            for d in "${devices[@]}"; do
+                local display target dname
+                display=$(echo "$d" | cut -d'|' -f1)
+                target=$(echo "$d" | cut -d'|' -f2)
+                dname=$(echo "$d" | cut -d'|' -f3)
+                if [[ "$display" == "$sel" ]]; then
+                    results+=("${target}|${dname}")
+                fi
+            done
+        done <<< "$selected"
+        printf '%s\n' "${results[@]}"
+        return 0
+    fi
+
+    # No selection — check if query is a manual IP:port
+    if [[ -n "$query" && "$query" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+        local manual_target="$query"
+        [[ "$manual_target" != *":"* ]] && manual_target="${manual_target}:5555"
+        echo "${manual_target}|manual"
+        return 0
+    fi
+
+    return 1
 }
 
 _connect() {
